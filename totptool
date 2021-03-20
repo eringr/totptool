@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# Copyright (c) 2021 Erin Hensel
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -e
+
+function error_msg {
+    { echo "$0 - Error: $1"; exit 1; }
+}
+
+[ -z "${TOTP_UID}" ] && error_msg "Variable TOTP_UID must be exported with gpg encryption ID"
+[ -z "${TOTP_KID}" ] && error_msg "Variable TOTP_KID must be exported with gpg encryption key ID"
+
+if [ -z "${TOTP_BASE}" ]; then
+    BASE_DIR="${HOME}/.2fa"
+else
+    BASE_DIR="${TOTP_BASE}"
+fi
+
+_GPG="gpg -u ${TOTP_KID} -r ${TOTP_UID}"
+
+which oathtool > /dev/null || error_msg "Requires oathtool (apt install oathtool)"
+which gpg > /dev/null || error_msg "Requires gpg (apt install gpg)"
+
+mkdir -p ${BASE_DIR}
+SERVICES_FILES=$(find "${BASE_DIR}" -name *.gpg)
+declare -a SERVICES
+for f in ${SERVICES_FILES}; do
+    stripped=${f%.*}
+    SERVICES+=("${stripped##*/}")
+done
+
+function install_key {
+    echo "Enter service name:"
+    read SERVICE
+
+    [ -z "${SERVICE}" ] && error_msg "Nothing to do"
+    [[ " ${SERVICES[@]} " =~ " ${SERVICE} " ]] && error_msg "Service already exists.  Delete service in ${BASE_DIR} explicitly before proceeding."
+
+    echo "Paste private key (Base32 format, input is not displayed):"
+    read -s KEY_PLAIN
+
+    oathtool -b --totp "${KEY_PLAIN}" > /dev/null || error_msg "Invalid private key"
+
+    KEY_FILE="${BASE_DIR}"/"${SERVICE}".gpg
+    mkdir -p "${KEY_FILE%/*}"
+    echo ${KEY_PLAIN} | ${_GPG} --encrypt > "${KEY_FILE}"
+
+    echo "Service private key stored encrypted to ${KEY_FILE}"
+}
+
+function gen_totp {
+    SERVICE="${1}"
+    [ -z "${SERVICE}" ] && error_msg "No service specified (usage: $0 gen <service>)"
+    KEY_FILE="${BASE_DIR}"/"${SERVICE}".gpg
+    [ -f "${KEY_FILE}" ] || error_msg "Service not found"
+    KEY=$(cat ${KEY_FILE} | ${_GPG} --quiet --decrypt )
+    CODE=$(oathtool -b --totp "${KEY}")
+    if [ -z ${SCRIPTABLE} ]; then
+        echo "OTP: ${CODE} - Time remaining: $(echo $(( 30 - $(date '+%s') % 30 )))s"
+    else
+	echo ${CODE}
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+case $1 in
+    add|list)
+        COMMAND=$1
+	shift
+        ;;
+    gen)
+        COMMAND=$1
+	SERVICE=$2
+	shift
+	shift
+	;;
+    --scriptable)
+        SCRIPTABLE=1
+	shift
+	;;
+    *)
+        echo "Argument \"$1\" not recognized"
+	exit 1
+	;;
+esac
+done
+
+[ -z ${COMMAND} ] && error_msg "Need one command: add, gen, list"
+
+if [ ${COMMAND} = "add" ]; then
+    install_key
+    exit $?
+fi
+
+if [ ${COMMAND} = "gen" ]; then
+    gen_totp ${SERVICE}
+    exit $?
+fi
+
+if [ ${COMMAND} = "list" ]; then
+    printf '%s\n' "${SERVICES[@]}"
+    exit $?
+fi
+
